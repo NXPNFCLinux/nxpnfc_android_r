@@ -1,0 +1,734 @@
+diff --git a/1.1/Nfc.h b/1.1/Nfc.h
+index bd45727..f27b487 100755
+--- a/1.1/Nfc.h
++++ b/1.1/Nfc.h
+@@ -1,6 +1,6 @@
+ /******************************************************************************
+  *
+- *  Copyright 2018 NXP
++ *  Copyright 2018,2020 NXP
+  *
+  *  Licensed under the Apache License, Version 2.0 (the "License");
+  *  you may not use this file except in compliance with the License.
+@@ -95,7 +95,7 @@ struct Nfc : public V1_1::INfc, public hidl_death_recipient {
+   }
+ 
+   virtual void serviceDied(uint64_t /*cookie*/, const wp<IBase>& /*who*/) {
+-    close();
++    abort();
+   }
+ 
+  private:
+diff --git a/Android.bp b/Android.bp
+index bfd2e4c..a796f70 100644
+--- a/Android.bp
++++ b/Android.bp
+@@ -23,6 +23,7 @@ cc_library_shared {
+         "-Wextra",
+         // Allow implicit fallthroughs in phDnldNfc_Internal.cc and phNxpConfig.cpp until they are fixed.
+         "-Wno-implicit-fallthrough",
++	"-DNXP_EXTNS=TRUE",
+     ],
+ 
+     srcs: [
+diff --git a/extns/impl/Nxp_Features.h b/extns/impl/Nxp_Features.h
+index d841791..461b682 100755
+--- a/extns/impl/Nxp_Features.h
++++ b/extns/impl/Nxp_Features.h
+@@ -1,6 +1,6 @@
+ /******************************************************************************
+  *
+- *  Copyright 2018 NXP
++ *  Copyright 2018,2020 NXP
+  *
+  *  Licensed under the Apache License, Version 2.0 (the "License");
+  *  you may not use this file except in compliance with the License.
+@@ -25,6 +25,8 @@
+ #define FW_MOBILE_MAJOR_NUMBER_PN81A 0x02
+ #define FW_MOBILE_MAJOR_NUMBER_PN551 0x05
+ #define FW_MOBILE_MAJOR_NUMBER_PN557 0x01
++#define FW_MOBILE_MAJOR_NUMBER_PN548AD 0x01
++
+  using namespace std;
+ typedef enum {
+   unknown,
+@@ -60,7 +62,9 @@ extern tNfc_featureList nfcFL;
+       nfcFL.chipType = pn553;                                                \
+     } else if (chipType == pn67T) {                                          \
+       nfcFL.chipType = pn551;                                                \
+-    }                                                                        \
++    } else if (chipType == pn66T) {                                          \
++      nfcFL.chipType = pn548C2;                                              \
++     }                                                                       \
+       CONFIGURE_FEATURELIST_NFCC(chipType)                                   \
+   }
+ 
+@@ -91,7 +95,15 @@ extern tNfc_featureList nfcFL;
+       nfcFL._PHDNLDNFC_USERDATA_EEPROM_LEN = 0x0C00U;                       \
+       nfcFL._FW_MOBILE_MAJOR_NUMBER = FW_MOBILE_MAJOR_NUMBER_PN551;         \
+                                                                             \
+-    }                                                                       \
++    } else if (chipType == pn548C2 || chipType == pn66T) {                  \
++                                                                            \
++      STRCPY_FW_LIB("libpn548ad_fw")                                        \
++      STRCPY_FW_BIN("pn548")                                                \
++                                                                            \
++      nfcFL._PHDNLDNFC_USERDATA_EEPROM_OFFSET = 0x02BCU;                    \
++      nfcFL._PHDNLDNFC_USERDATA_EEPROM_LEN = 0x0C00U;                       \
++      nfcFL._FW_MOBILE_MAJOR_NUMBER = FW_MOBILE_MAJOR_NUMBER_PN548AD;       \
++     }                                                                      \
+   }
+ #define STRCPY_FW_LIB(str) {                                                \
+   nfcFL._FW_LIB_PATH.clear();                                               \
+diff --git a/extns/impl/hal_nxpnfc.h b/extns/impl/hal_nxpnfc.h
+index a77ece8..7147820 100755
+--- a/extns/impl/hal_nxpnfc.h
++++ b/extns/impl/hal_nxpnfc.h
+@@ -1,6 +1,6 @@
+ /******************************************************************************
+  *
+- *  Copyright 2018 NXP
++ *  Copyright 2018,2020 NXP
+  *
+  *  Licensed under the Apache License, Version 2.0 (the "License");
+  *  you may not use this file except in compliance with the License.
+@@ -27,6 +27,11 @@ enum {
+   // HAL_NFC_ENABLE_I2C_FRAGMENTATION_EVT = 0x07,
+   HAL_NFC_POST_MIN_INIT_CPLT_EVT = 0x08
+ };
++
++enum {
++  HAL_NFC_GET_NXP_CONFIG = 30,
++};
++
+ /*
+  * Data structures provided below are used of Hal Ioctl calls
+  */
+@@ -76,6 +81,10 @@ typedef struct {
+   long level;
+ } nfc_nci_ExtnInputData_t;
+ 
++typedef struct {
++  uint8_t wAgcDebugEnable;
++} nxp_nfc_config_t;
++
+ /*
+  * outputData_t :ioctl has multiple commands/responses
+  * This contains the output types for each ioctl.
+@@ -89,6 +98,7 @@ typedef union {
+   uint16_t fwDwnldStatus;
+   uint16_t fwMwVerStatus;
+   uint8_t chipType;
++  nxp_nfc_config_t nxpConfigs;
+ } outputData_t;
+ 
+ /*
+diff --git a/extns/intf/nxpnfc/1.0/manifest.xml b/extns/intf/nxpnfc/1.0/manifest.xml
+index ceabdbd..fcb4033 100644
+--- a/extns/intf/nxpnfc/1.0/manifest.xml
++++ b/extns/intf/nxpnfc/1.0/manifest.xml
+@@ -3,12 +3,20 @@
+         <name>android.hardware.nfc</name>
+         <transport>hwbinder</transport>
+         <impl level="generic"></impl>
+-        <version>1.0</version>
++        <version>1.1</version>
++        <interface>
++            <name>INfc</name>
++            <instance>default</instance>
++        </interface>
+     </hal>
+     <hal format="hidl">
+         <name>vendor.nxp.nxpnfc</name>
+         <transport>hwbinder</transport>
+         <impl level="generic"></impl>
+         <version>1.0</version>
++        <interface>
++            <name>INfc</name>
++            <instance>default</instance>
++        </interface>
+     </hal>
+ </manifest>
+diff --git a/halimpl/dnld/phDnldNfc.cc b/halimpl/dnld/phDnldNfc.cc
+index 5ee2aac..d1edf70 100644
+--- a/halimpl/dnld/phDnldNfc.cc
++++ b/halimpl/dnld/phDnldNfc.cc
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2010-2014 NXP Semiconductors
++ * Copyright (C) 2010-2014,2020 NXP Semiconductors
+  *
+  * Licensed under the Apache License, Version 2.0 (the "License");
+  * you may not use this file except in compliance with the License.
+@@ -243,6 +243,8 @@ NFCSTATUS phDnldNfc_CheckIntegrity(uint8_t bChipVer, pphDnldNfc_Buff_t pCRCData,
+     } else {
+       if ((PHDNLDNFC_HWVER_MRA2_1 == bChipVer) ||
+           (PHDNLDNFC_HWVER_MRA2_2 == bChipVer) ||
++          ((nfcFL.chipType == pn548C2) &&
++           (PHDNLDNFC_HWVER_PN548AD_MRA1_0 == bChipVer)) ||
+           ((nfcFL.chipType == pn551) &&
+            (PHDNLDNFC_HWVER_PN551_MRA1_0 == bChipVer)) ||
+           (((nfcFL.chipType == pn553) || (nfcFL.chipType == pn557)) &&
+diff --git a/halimpl/dnld/phDnldNfc.h b/halimpl/dnld/phDnldNfc.h
+index ae672ef..412cbe4 100755
+--- a/halimpl/dnld/phDnldNfc.h
++++ b/halimpl/dnld/phDnldNfc.h
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2010-2014 NXP Semiconductors
++ * Copyright (C) 2010-2014,2020 NXP Semiconductors
+  *
+  * Licensed under the Apache License, Version 2.0 (the "License");
+  * you may not use this file except in compliance with the License.
+@@ -43,6 +43,8 @@ typedef void (*pphDnldNfc_RspCb_t)(void* pContext, NFCSTATUS wStatus,
+ #define PHDNLDNFC_HWVER_MRA2_1 (0x04U) /* ChipVersion MRA2.1 */
+ #define PHDNLDNFC_HWVER_MRA2_2 (0x05U) /* ChipVersion MRA2.2 */
+ 
++/* PN548AD ChipVersion MRA1.0 */
++#define PHDNLDNFC_HWVER_PN548AD_MRA1_0 (0x08U)
+ /* PN551 ChipVersion MRA1.0 */
+ #define PHDNLDNFC_HWVER_PN551_MRA1_0 (0x08U)
+ /* PN553-NCI1.0 ChipVersion MRA1.0 */
+diff --git a/halimpl/dnld/phNxpNciHal_Dnld.cc b/halimpl/dnld/phNxpNciHal_Dnld.cc
+index ceca050..a6cb1de 100644
+--- a/halimpl/dnld/phNxpNciHal_Dnld.cc
++++ b/halimpl/dnld/phNxpNciHal_Dnld.cc
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright (C) 2012-2014 NXP Semiconductors
++ * Copyright (C) 2012-2014,2020 NXP Semiconductors
+  *
+  * Licensed under the Apache License, Version 2.0 (the "License");
+  * you may not use this file except in compliance with the License.
+@@ -523,6 +523,8 @@ static void phNxpNciHal_fw_dnld_get_version_cb(void* pContext, NFCSTATUS status,
+ 
+       if ((PHDNLDNFC_HWVER_MRA2_1 == bHwVer) ||
+           (PHDNLDNFC_HWVER_MRA2_2 == bHwVer) ||
++          ((nfcFL.chipType == pn548C2) &&
++           (PHDNLDNFC_HWVER_PN548AD_MRA1_0 == bHwVer)) ||
+           ((nfcFL.chipType == pn551) &&
+            (PHDNLDNFC_HWVER_PN551_MRA1_0 == bHwVer)) ||
+           (((nfcFL.chipType == pn553) || (nfcFL.chipType == pn557)) &&
+diff --git a/halimpl/hal/phNxpNciHal.cc b/halimpl/hal/phNxpNciHal.cc
+index f9a482d..7d84294 100644
+--- a/halimpl/hal/phNxpNciHal.cc
++++ b/halimpl/hal/phNxpNciHal.cc
+@@ -51,6 +51,8 @@ static uint8_t cmd_icode_eof[] = {0x00, 0x00, 0x00};
+ 
+ /* FW download success flag */
+ static uint8_t fw_download_success = 0;
++/* Anti-tearing mechanism sucess flag */
++uint8_t anti_tearing_recovery_success = 0;
+ 
+ static uint8_t config_access = false;
+ static uint8_t config_success = true;
+@@ -78,6 +80,8 @@ extern uint8_t gRecFWDwnld;
+ static uint8_t gRecFwRetryCount;  // variable to hold dummy FW recovery count
+ static uint8_t Rx_data[NCI_MAX_DATA_LEN];
+ extern int phPalEse_spi_ioctl(phPalEse_ControlCode_t eControlCode,void *pDevHandle, long level);
++uint8_t discovery_cmd[50] = {0};
++uint8_t discovery_cmd_len = 0;
+ uint32_t timeoutTimerId = 0;
+ bool nfc_debug_enabled = true;
+ 
+@@ -512,7 +516,7 @@ static void phNxpNciHal_get_clk_freq(void) {
+                   nxpprofile_ctrl.bClkSrcVal);
+   NXPLOG_FWDNLD_D("gphNxpNciHal_fw_IoctlCtx.bClkFreqVal = 0x%x",
+                   nxpprofile_ctrl.bClkFreqVal);
+-  NXPLOG_FWDNLD_D("gphNxpNciHal_fw_IoctlCtx.bClkFreqVal = 0x%x",
++  NXPLOG_FWDNLD_D("gphNxpNciHal_fw_IoctlCtx.bTimeout = 0x%x",
+                   nxpprofile_ctrl.bTimeout);
+ 
+   if ((nxpprofile_ctrl.bClkSrcVal < CLK_SRC_XTAL) ||
+@@ -630,6 +634,11 @@ int phNxpNciHal_MinOpen (){
+   tOsalConfig.pLogFile = NULL;
+   tTmlConfig.dwGetMsgThreadId = (uintptr_t)nxpncihal_ctrl.gDrvCfg.nClientId;
+ 
++  if (nfcFL.chipType == pn548C2) {
++    memset(discovery_cmd, 0, sizeof(discovery_cmd));
++    discovery_cmd_len = 0;
++  }
++
+   /* Initialize TML layer */
+   wConfigStatus = phTmlNfc_Init(&tTmlConfig);
+   if (wConfigStatus != NFCSTATUS_SUCCESS) {
+@@ -838,9 +847,82 @@ int phNxpNciHal_fw_mw_ver_check() {
+              (rom_version == FW_MOBILE_ROM_VERSION_PN551) &&
+              (fw_maj_ver == 0x05)) {
+     status = NFCSTATUS_SUCCESS;
+-  }
++  } else if ((nfcFL.chipType == pn548C2) &&
++             (rom_version == FW_MOBILE_ROM_VERSION_PN548AD) &&
++             (fw_maj_ver == 0x01)) {
++    status = NFCSTATUS_SUCCESS;
++   }
+   return status;
+ }
++
++NFCSTATUS phNxpNciHal_core_reset_recovery() {
++  NFCSTATUS status = NFCSTATUS_FAILED;
++
++  /*NCI_INIT_CMD*/
++  static uint8_t cmd_init_nci[] = {0x20, 0x01, 0x00};
++  /*NCI_RESET_CMD*/
++  static uint8_t cmd_reset_nci[] = {0x20, 0x00, 0x01,
++                                    0x00};  // keep configuration
++  static uint8_t cmd_init_nci2_0[] = {0x20, 0x01, 0x02, 0x00, 0x00};
++  /* reset config cache */
++  uint8_t retry_core_init_cnt = 0;
++
++  if (discovery_cmd_len == 0) {
++    goto FAILURE;
++  }
++  NXPLOG_NCIHAL_D("%s: recovery", __func__);
++
++retry_core_init:
++  if (retry_core_init_cnt > 3) {
++    goto FAILURE;
++  }
++
++  status = phTmlNfc_IoCtl(phTmlNfc_e_ResetDevice);
++  if (status != NFCSTATUS_SUCCESS) {
++    NXPLOG_NCIHAL_D("PN54X Reset - FAILED\n");
++    goto FAILURE;
++  }
++  status = phNxpNciHal_send_ext_cmd(sizeof(cmd_reset_nci), cmd_reset_nci);
++  if ((status != NFCSTATUS_SUCCESS) &&
++      (nxpncihal_ctrl.retry_cnt >= MAX_RETRY_COUNT)) {
++    retry_core_init_cnt++;
++    goto retry_core_init;
++  } else if (status != NFCSTATUS_SUCCESS) {
++    NXPLOG_NCIHAL_D("NCI_CORE_RESET: Failed");
++    retry_core_init_cnt++;
++    goto retry_core_init;
++  }
++  if (nxpncihal_ctrl.nci_info.nci_version == NCI_VERSION_2_0) {
++    status = phNxpNciHal_send_ext_cmd(sizeof(cmd_init_nci2_0), cmd_init_nci2_0);
++  } else {
++    status = phNxpNciHal_send_ext_cmd(sizeof(cmd_init_nci), cmd_init_nci);
++  }
++  if (status != NFCSTATUS_SUCCESS) {
++    NXPLOG_NCIHAL_D("NCI_CORE_INIT : Failed");
++    retry_core_init_cnt++;
++    goto retry_core_init;
++  }
++
++  status = phNxpNciHal_send_ext_cmd(discovery_cmd_len, discovery_cmd);
++  if (status != NFCSTATUS_SUCCESS) {
++    NXPLOG_NCIHAL_D("RF_DISCOVERY : Failed");
++    retry_core_init_cnt++;
++    goto retry_core_init;
++  }
++
++  return NFCSTATUS_SUCCESS;
++FAILURE:
++  abort();
++}
++
++void phNxpNciHal_discovery_cmd_ext(uint8_t* p_cmd_data, uint16_t cmd_len) {
++  NXPLOG_NCIHAL_D("phNxpNciHal_discovery_cmd_ext");
++  if (cmd_len > 0 && cmd_len <= sizeof(discovery_cmd)) {
++    memcpy(discovery_cmd, p_cmd_data, cmd_len);
++    discovery_cmd_len = cmd_len;
++  }
++}
++
+ /******************************************************************************
+  * Function         phNxpNciHal_MinOpen_complete
+  *
+@@ -1010,7 +1092,7 @@ int phNxpNciHal_write_unlocked(uint16_t data_len, const uint8_t* p_data) {
+   /* check for write synchronyztion */
+   if(phNxpNciHal_check_ncicmd_write_window(nxpncihal_ctrl.cmd_len,
+                          nxpncihal_ctrl.p_cmd_data) != NFCSTATUS_SUCCESS) {
+-    NXPLOG_NCIHAL_D("phNxpNciHal_write_unlocked Create cb data failed");
++    NXPLOG_NCIHAL_D("phNxpNciHal_write_unlocked check nci write window failed");
+     data_len = 0;
+     goto clean_and_return;
+   }
+@@ -1436,7 +1518,10 @@ int phNxpNciHal_core_initialized(uint8_t* p_core_init_rsp_params) {
+     }
+   }
+ 
+-  if (isNxpConfigModified() || (fw_download_success == 1)) {
++  if (isNxpConfigModified() || (fw_download_success == 1)  || (anti_tearing_recovery_success == 1)) {
++    NXPLOG_NCIHAL_D("Applying Settings: isNxpConfigModified()=%d, fw_download_success=%d, anti_tearing_recovery_success=%d",
++      isNxpConfigModified(), fw_download_success, anti_tearing_recovery_success);
++
+     retlen = 0;
+     fw_download_success = 0;
+ 
+@@ -1692,12 +1777,16 @@ int phNxpNciHal_core_initialized(uint8_t* p_core_init_rsp_params) {
+     if (status != NFCSTATUS_SUCCESS) {
+       NXPLOG_NCIHAL_E("NXP Update MW EEPROM Proprietary Ext failed");
+     }
++
++    anti_tearing_recovery_success = 0;
+   }
+ 
+   retlen = 0;
+ 
++  NXPLOG_NCIHAL_D("Performing NAME_NXP_CORE_CONF Settings");
+   isfound =
+       GetNxpByteArrayValue(NAME_NXP_CORE_CONF, (char*)buffer, bufflen, &retlen);
++  NXPLOG_NCIHAL_D("NAME_NXP_CORE_CONF Settings Found - %d Len: %ld", isfound, retlen);
+   if (retlen > 0) {
+     /* NXP ACT Proprietary Ext */
+     status = phNxpNciHal_send_ext_cmd(retlen, buffer);
+@@ -2220,6 +2309,31 @@ int phNxpNciHal_configDiscShutdown(void) {
+   return NFCSTATUS_SUCCESS;
+ }
+ 
++#if(NXP_EXTNS == TRUE)
++/******************************************************************************
++ * Function         phNxpNciHal_getNxp
++ *
++ * Description      This function can be used by HAL to inform
++ *                 to update vendor configuration parametres
++ *
++ * Returns          void.
++ *
++ ******************************************************************************/
++void phNxpNciHal_getNxpConfig(nfc_nci_IoctlInOutData_t *pInpOutData) {
++  unsigned long num = 0;
++  uint8_t *buffer = NULL;
++  long bufflen = 260;
++
++  buffer = (uint8_t *)malloc(bufflen * sizeof(uint8_t));
++  memset(&pInpOutData->out.data.nxpConfigs, 0x00, sizeof(pInpOutData->out.data.nxpConfigs));
++  if (GetNxpNumValue(NAME_NXP_AGC_DEBUG_ENABLE, &num, sizeof(num))) {
++    pInpOutData->out.data.nxpConfigs.wAgcDebugEnable = num;
++  }else {
++    pInpOutData->out.data.nxpConfigs.wAgcDebugEnable = 0x00;
++  }
++}
++#endif
++
+ /******************************************************************************
+  * Function         phNxpNciHal_getVendorConfig
+  *
+@@ -2575,6 +2689,12 @@ int phNxpNciHal_ioctl(long arg, void* p_data) {
+         if(gpEseAdapt !=  NULL)
+         ret = gpEseAdapt->HalIoctl(HAL_NFC_IOCTL_RF_STATUS_UPDATE,pInpOutData);
+         break;
++#if(NXP_EXTNS == TRUE)
++    case HAL_NFC_GET_NXP_CONFIG:
++      phNxpNciHal_getNxpConfig(pInpOutData);
++      ret = 0;
++      break;
++#endif
+     default:
+       NXPLOG_NCIHAL_E("%s : Wrong arg = %ld", __func__, arg);
+       break;
+diff --git a/halimpl/hal/phNxpNciHal.h b/halimpl/hal/phNxpNciHal.h
+index 14737c4..c37b9d1 100644
+--- a/halimpl/hal/phNxpNciHal.h
++++ b/halimpl/hal/phNxpNciHal.h
+@@ -20,6 +20,7 @@
+ #include "NxpNfcCapability.h"
+ #include <hardware/nfc.h>
+ #include <phNxpNciHal_utils.h>
++#include "hal_nxpnfc.h"
+ 
+ /********************* Definitions and structures *****************************/
+ #define MAX_RETRY_COUNT 5
+@@ -34,6 +35,7 @@
+ typedef void(phNxpNciHal_control_granted_callback_t)();
+ 
+ /*ROM CODE VERSION FW*/
++#define FW_MOBILE_ROM_VERSION_PN548AD 0x10
+ #define FW_MOBILE_ROM_VERSION_PN551 0x10
+ #define FW_MOBILE_ROM_VERSION_PN553 0x11
+ #define FW_MOBILE_ROM_VERSION_PN557 0x12
+@@ -179,6 +181,8 @@ int phNxpNciHal_check_ncicmd_write_window(uint16_t cmd_len, uint8_t* p_cmd);
+ void phNxpNciHal_request_control(void);
+ void phNxpNciHal_release_control(void);
+ int phNxpNciHal_write_unlocked(uint16_t data_len, const uint8_t* p_data);
++NFCSTATUS phNxpNciHal_core_reset_recovery();
++void phNxpNciHal_discovery_cmd_ext(uint8_t* p_cmd_data, uint16_t cmd_len);
+ /*******************************************************************************
+ **
+ ** Function         phNxpNciHal_configFeatureList
+@@ -188,4 +192,17 @@ int phNxpNciHal_write_unlocked(uint16_t data_len, const uint8_t* p_data);
+ ** Returns          none
+ *******************************************************************************/
+ void phNxpNciHal_configFeatureList(uint8_t* init_rsp, uint16_t rsp_len);
++#if(NXP_EXTNS == TRUE)
++/*******************************************************************************
++**
++** Function         phNxpNciHal_getNxpConfig
++**
++** Description      Read vendor configuration macro values
++**
++** Parameters       ioctl input/output struct.
++**
++** Returns          none
++*******************************************************************************/
++void phNxpNciHal_getNxpConfig(nfc_nci_IoctlInOutData_t *pInpOutData);
++#endif
+ #endif /* _PHNXPNCIHAL_H_ */
+diff --git a/halimpl/hal/phNxpNciHal_ext.cc b/halimpl/hal/phNxpNciHal_ext.cc
+index a9c88a8..f718e2e 100644
+--- a/halimpl/hal/phNxpNciHal_ext.cc
++++ b/halimpl/hal/phNxpNciHal_ext.cc
+@@ -32,10 +32,12 @@
+ /******************* Global variables *****************************************/
+ extern phNxpNciHal_Control_t nxpncihal_ctrl;
+ extern phNxpNciProfile_Control_t nxpprofile_ctrl;
++extern uint8_t anti_tearing_recovery_success;
+ extern uint32_t cleanup_timer;
+ extern bool nfc_debug_enabled;
+ uint8_t icode_detected = 0x00;
+ uint8_t icode_send_eof = 0x00;
++uint8_t nfcdep_detected = 0x00;
+ static uint8_t ee_disc_done = 0x00;
+ uint8_t EnableP2P_PrioLogic = false;
+ extern bool bEnableMfcExtns;
+@@ -97,6 +99,10 @@ NFCSTATUS phNxpNciHal_process_ext_rsp(uint8_t* p_ntf, uint16_t* p_len) {
+   NFCSTATUS status = NFCSTATUS_SUCCESS;
+ 
+   if (p_ntf[0] == 0x61 && p_ntf[1] == 0x05 && *p_len < 14) {
++    if ((nfcFL.chipType == pn548C2) && (nfcdep_detected)) {
++      nfcdep_detected = 0x00;
++    }
++
+     if(*p_len <= 6) {
+       android_errorWriteLog(0x534e4554, "118152591");
+     }
+@@ -168,6 +174,9 @@ NFCSTATUS phNxpNciHal_process_ext_rsp(uint8_t* p_ntf, uint16_t* p_len) {
+         break;
+       case 0x03:
+         NXPLOG_NCIHAL_D("NxpNci: RF Interface = NFC-DEP");
++        if (nfcFL.chipType == pn548C2) {
++          nfcdep_detected = 0x01;
++        }
+         break;
+       case 0x80:
+         NXPLOG_NCIHAL_D("NxpNci: RF Interface = MIFARE");
+@@ -365,7 +374,12 @@ NFCSTATUS phNxpNciHal_process_ext_rsp(uint8_t* p_ntf, uint16_t* p_len) {
+       *p_len = 5;
+     }
+   }
+-
++  else if(p_ntf[0] == 0x60 && p_ntf[1] == 0x07 && p_ntf[3] == 0xE6)
++  {
++      NXPLOG_NCIHAL_E("CORE_GENERIC_ERROR_NTF received!");
++      /* register recovery success to force applying RF settings */
++      anti_tearing_recovery_success = 1;
++  }
+ 
+   if (*p_len == 4 && p_ntf[0] == 0x61 && p_ntf[1] == 0x07 ) {
+     unsigned long rf_update_enable = 0;
+@@ -462,6 +476,14 @@ static NFCSTATUS phNxpNciHal_ext_process_nfc_init_rsp(uint8_t* p_ntf,
+       }
+       NXPLOG_NCIHAL_D("CORE_RESET_NTF received !");
+       NXPLOG_NCIR_E("len = %3d > %s", *p_len, print_buffer);
++      if ((nfcFL.chipType == pn548C2) && nfcdep_detected &&
++          !(p_ntf[2] == 0x06 && p_ntf[3] == 0xA0 && p_ntf[4] == 0x00 &&
++            ((p_ntf[5] == 0xC9 && p_ntf[6] == 0x95 && p_ntf[7] == 0x00 &&
++              p_ntf[8] == 0x00) ||
++             (p_ntf[5] == 0x07 && p_ntf[6] == 0x39 && p_ntf[7] == 0xF2 &&
++              p_ntf[8] == 0x00)))) {
++        nfcdep_detected = 0x00;
++      }
+       phNxpNciHal_emergency_recovery();
+       status = NFCSTATUS_FAILED;
+     } /* Parsing CORE_INIT_RSP*/
+@@ -722,6 +744,10 @@ NFCSTATUS phNxpNciHal_write_ext(uint16_t* cmd_len, uint8_t* p_cmd_data,
+     NXPLOG_NCIHAL_D("> Polling Loop Started");
+     icode_detected = 0;
+     icode_send_eof = 0;
++    if (nfcFL.chipType == pn548C2) {
++      // Cache discovery cmd for recovery
++      phNxpNciHal_discovery_cmd_ext(p_cmd_data, *cmd_len);
++    }
+   }
+   // 22000100
+   else if (p_cmd_data[0] == 0x22 && p_cmd_data[1] == 0x00 &&
+@@ -876,6 +902,52 @@ NFCSTATUS phNxpNciHal_write_ext(uint16_t* cmd_len, uint8_t* p_cmd_data,
+     }
+   }
+ 
++  if (nfcFL.chipType == pn548C2 && p_cmd_data[0] == 0x20 && p_cmd_data[1] == 0x02) {
++    uint8_t temp;
++    uint8_t* p = p_cmd_data + 4;
++    uint8_t* end = p_cmd_data + *cmd_len;
++    while (p < end) {
++      if (*p == 0x53)  // LF_T3T_FLAGS
++      {
++        NXPLOG_NCIHAL_D("> Going through workaround - LF_T3T_FLAGS swap");
++        temp = *(p + 3);
++        *(p + 3) = *(p + 2);
++        *(p + 2) = temp;
++        NXPLOG_NCIHAL_D("> Going through workaround - LF_T3T_FLAGS - End");
++        status = NFCSTATUS_SUCCESS;
++        break;
++      }
++      if (*p == 0xA0) {
++        p += *(p + 2) + 3;
++      } else {
++        p += *(p + 1) + 2;
++      }
++    }
++  }
++
++  if ((nfcFL.chipType == pn548C2) &&
++          (p_cmd_data[0] == 0x20 && p_cmd_data[1] == 0x02)) {
++      uint8_t temp;
++      uint8_t* p = p_cmd_data + 4;
++      uint8_t* end = p_cmd_data + *cmd_len;
++      while (p < end) {
++          if (*p == 0x53)  // LF_T3T_FLAGS
++          {
++              NXPLOG_NCIHAL_D("> Going through workaround - LF_T3T_FLAGS swap");
++              temp = *(p + 3);
++              *(p + 3) = *(p + 2);
++              *(p + 2) = temp;
++              NXPLOG_NCIHAL_D("> Going through workaround - LF_T3T_FLAGS - End");
++              status = NFCSTATUS_SUCCESS;
++              break;
++          }
++          if (*p == 0xA0) {
++              p += *(p + 2) + 3;
++          } else {
++              p += *(p + 1) + 2;
++          }
++      }
++  }
+ 
+   return status;
+ }
+diff --git a/halimpl/libnfc-nxp-PN548AD_example.conf b/halimpl/libnfc-nxp-PN548AD_example.conf
+index 53121b2..00ae0b0 100755
+--- a/halimpl/libnfc-nxp-PN548AD_example.conf
++++ b/halimpl/libnfc-nxp-PN548AD_example.conf
+@@ -32,6 +32,10 @@ VZW_FEATURE_ENABLE=0x01
+ ###############################################################################
+ # File name for Firmware
+ NXP_FW_NAME="libpn548ad_fw.so"
++# Firmware file type
++#.so file   0x01
++#.bin file  0x02
++NXP_FW_TYPE=0x01
+ 
+ ###############################################################################
+ # System clock source selection configuration
+diff --git a/halimpl/libnfc-nxp-PN66T_example.conf b/halimpl/libnfc-nxp-PN66T_example.conf
+index d63881f..972866b 100755
+--- a/halimpl/libnfc-nxp-PN66T_example.conf
++++ b/halimpl/libnfc-nxp-PN66T_example.conf
+@@ -31,6 +31,10 @@ VZW_FEATURE_ENABLE=0x01
+ ###############################################################################
+ # File name for Firmware
+ NXP_FW_NAME="libpn548ad_fw.so"
++# Firmware file type
++#.so file   0x01
++#.bin file  0x02
++NXP_FW_TYPE=0x01
+ 
+ ###############################################################################
+ # System clock source selection configuration
+diff --git a/halimpl/src/adaptation/EseAdaptation.cpp b/halimpl/src/adaptation/EseAdaptation.cpp
+index f2a2d6d..2f33d34 100755
+--- a/halimpl/src/adaptation/EseAdaptation.cpp
++++ b/halimpl/src/adaptation/EseAdaptation.cpp
+@@ -1,7 +1,7 @@
+ /******************************************************************************
+  *
+  *
+- *  Copyright (C) 2015 NXP Semiconductors
++ *  Copyright (C) 2015,2020 NXP Semiconductors
+  *
+  *  Licensed under the Apache License, Version 2.0 (the "License");
+  *  you may not use this file except in compliance with the License.
+@@ -57,8 +57,6 @@ ThreadCondVar EseAdaptation::mHalCoreInitCompletedEvent;
+ ThreadCondVar EseAdaptation::mHalInitCompletedEvent;
+ #define SIGNAL_NONE 0
+ #define SIGNAL_SIGNALED 1
+-static uint8_t isSignaled = SIGNAL_NONE;
+-static uint8_t evt_status;
+ #endif
+ 
+ /*******************************************************************************
+diff --git a/halimpl/utils/NxpNfcCapability.cpp b/halimpl/utils/NxpNfcCapability.cpp
+index 720ed08..4bb7f64 100644
+--- a/halimpl/utils/NxpNfcCapability.cpp
++++ b/halimpl/utils/NxpNfcCapability.cpp
+@@ -1,6 +1,6 @@
+ /******************************************************************************
+  *
+- *  Copyright (C) 2015 NXP Semiconductors
++ *  Copyright (C) 2015,2020 NXP Semiconductors
+  *
+  *  Licensed under the Apache License, Version 2.0 (the "License");
+  *  you may not use this file except in compliance with the License.
+@@ -89,6 +89,7 @@ tNFC_chipType capability::getChipType(uint8_t* msg, uint16_t msg_len) {
+ 
+         case 0x28:
+         case 0x48:  // NQ210
++        case 0x88:
+           chipType = pn548C2;
+           break;
+ 
+diff --git a/halimpl/utils/phNxpConfig.h b/halimpl/utils/phNxpConfig.h
+index cc39097..82e52fa 100755
+--- a/halimpl/utils/phNxpConfig.h
++++ b/halimpl/utils/phNxpConfig.h
+@@ -20,7 +20,7 @@
+  *
+  *  The original Work has been changed by NXP Semiconductors.
+  *
+- *  Copyright (C) 2013-2014 NXP Semiconductors
++ *  Copyright (C) 2013-2014,2020 NXP Semiconductors
+  *
+  *  Licensed under the Apache License, Version 2.0 (the "License");
+  *  you may not use this file except in compliance with the License.
+@@ -107,6 +107,9 @@ int updateNxpConfigTimestamp();
+ #define NAME_OFFHOST_ROUTE_ESE "OFFHOST_ROUTE_ESE"
+ #define NAME_OFFHOST_ROUTE_UICC "OFFHOST_ROUTE_UICC"
+ #define NAME_DEFAULT_ISODEP_ROUTE "DEFAULT_ISODEP_ROUTE"
++#if(NXP_EXTNS == TRUE)
++#define NAME_NXP_AGC_DEBUG_ENABLE "NXP_AGC_DEBUG_ENABLE"
++#endif
+ 
+ /* default configuration */
+ #define default_storage_location "/data/vendor/nfc"
+diff --git a/halimpl/utils/phNxpNciHal_utils.cc b/halimpl/utils/phNxpNciHal_utils.cc
+index 57aa819..cbbe68e 100644
+--- a/halimpl/utils/phNxpNciHal_utils.cc
++++ b/halimpl/utils/phNxpNciHal_utils.cc
+@@ -1,6 +1,6 @@
+ /*
+  *
+- *  Copyright (C) 2013-2014 NXP Semiconductors
++ *  Copyright (C) 2013-2014,2020 NXP Semiconductors
+  *
+  *  Licensed under the Apache License, Version 2.0 (the "License");
+  *  you may not use this file except in compliance with the License.
+@@ -23,6 +23,10 @@
+ #include <phNxpNciHal.h>
+ #include <phNxpNciHal_utils.h>
+ 
++extern uint8_t discovery_cmd[50];
++extern uint8_t discovery_cmd_len;
++extern uint8_t nfcdep_detected;
++
+ /*********************** Link list functions **********************************/
+ 
+ /*******************************************************************************
+@@ -457,6 +461,16 @@ void phNxpNciHal_print_packet(const char* pString, const uint8_t* p_data,
+ *******************************************************************************/
+ 
+ void phNxpNciHal_emergency_recovery(void) {
++  if (nfcFL.chipType == pn548C2 && nfcdep_detected && discovery_cmd_len != 0) {
++    pthread_t pthread;
++    pthread_attr_t attr;
++    pthread_attr_init(&attr);
++    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
++    if (pthread_create(&pthread, &attr, (void *(*)(void *))phNxpNciHal_core_reset_recovery,
++                       NULL) == 0) {
++      return;
++    }
++  }
+   NXPLOG_NCIHAL_E("%s: abort()", __func__);
+   abort();
+ }

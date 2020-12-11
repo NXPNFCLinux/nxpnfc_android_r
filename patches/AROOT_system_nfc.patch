@@ -1,0 +1,702 @@
+From be0814a8c0aa55f259623dd4f54bc8b316526d35 Mon Sep 17 00:00:00 2001
+From: nxf31698 <suryaprakash.konduru@nxp.com>
+Date: Thu, 5 Nov 2020 20:50:04 +0530
+Subject: [PATCH] Patch for system/nfc/
+
+Change-Id: I612eafab452e9cc4978c722e577a2dc8bf5a0718
+---
+ src/Android.bp                  |   2 +
+ src/adaptation/NfcAdaptation.cc | 134 +++++++++++++++++++++++++-
+ src/adaptation/nfc_config.cc    |  28 ++++++
+ src/include/NfcAdaptation.h     |  42 ++++++++-
+ src/include/hal_nxpnfc.h        | 161 ++++++++++++++++++++++++++++++++
+ src/include/nfc_config.h        |  22 +++++
+ src/nfa/ce/nfa_ce_act.cc        |  24 +++++
+ src/nfc/tags/rw_i93.cc          |  29 +++++-
+ 8 files changed, 437 insertions(+), 5 deletions(-)
+ create mode 100755 src/include/hal_nxpnfc.h
+
+diff --git a/src/Android.bp b/src/Android.bp
+index 9075cf6..2e98bb4 100644
+--- a/src/Android.bp
++++ b/src/Android.bp
+@@ -21,6 +21,7 @@ cc_library_shared {
+         "android.hardware.nfc@1.0",
+         "android.hardware.nfc@1.1",
+         "android.hardware.nfc@1.2",
++        "vendor.nxp.nxpnfc@1.0",
+     ],
+     static_libs: [
+         "libnfcutils",
+@@ -30,6 +31,7 @@ cc_library_shared {
+         "-Wall",
+         "-Werror",
+         "-Wimplicit-fallthrough",
++        "-DNXP_EXTNS=TRUE",
+     ],
+     local_include_dirs: [
+         "include",
+diff --git a/src/adaptation/NfcAdaptation.cc b/src/adaptation/NfcAdaptation.cc
+index b0fc549..c347139 100644
+--- a/src/adaptation/NfcAdaptation.cc
++++ b/src/adaptation/NfcAdaptation.cc
+@@ -15,6 +15,25 @@
+  *  limitations under the License.
+  *
+  ******************************************************************************/
++/******************************************************************************
++ *
++ *  The original Work has been changed by NXP Semiconductors.
++ *
++ *  Copyright (C) 2020 NXP Semiconductors
++ *
++ *  Licensed under the Apache License, Version 2.0 (the "License");
++ *  you may not use this file except in compliance with the License.
++ *  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ *  Unless required by applicable law or agreed to in writing, software
++ *  distributed under the License is distributed on an "AS IS" BASIS,
++ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ *  See the License for the specific language governing permissions and
++ *  limitations under the License.
++ *
++ ******************************************************************************/
+ #include <android-base/stringprintf.h>
+ #include <android/hardware/nfc/1.1/INfc.h>
+ #include <android/hardware/nfc/1.2/INfc.h>
+@@ -34,6 +53,7 @@ using ::android::wp;
+ using ::android::hardware::hidl_death_recipient;
+ using ::android::hidl::base::V1_0::IBase;
+ 
++
+ using android::OK;
+ using android::sp;
+ using android::status_t;
+@@ -50,6 +70,11 @@ using NfcVendorConfigV1_1 = android::hardware::nfc::V1_1::NfcConfig;
+ using NfcVendorConfigV1_2 = android::hardware::nfc::V1_2::NfcConfig;
+ using android::hardware::nfc::V1_1::INfcClientCallback;
+ using android::hardware::hidl_vec;
++#if(NXP_EXTNS == TRUE)
++using ::android::wp;
++using ::android::hardware::hidl_death_recipient;
++using vendor::nxp::nxpnfc::V1_0::INxpNfc;
++#endif
+ 
+ extern bool nfc_debug_enabled;
+ 
+@@ -59,6 +84,10 @@ extern void delete_stack_non_volatile_store(bool forceDelete);
+ 
+ NfcAdaptation* NfcAdaptation::mpInstance = nullptr;
+ ThreadMutex NfcAdaptation::sLock;
++#if(NXP_EXTNS == TRUE)
++android::Mutex sIoctlMutex;
++sp<INxpNfc> NfcAdaptation::mHalNxpNfc = nullptr;
++#endif
+ tHAL_NFC_CBACK* NfcAdaptation::mHalCallback = nullptr;
+ tHAL_NFC_DATA_CBACK* NfcAdaptation::mHalDataCallback = nullptr;
+ ThreadCondVar NfcAdaptation::mHalOpenCompletedEvent;
+@@ -156,6 +185,25 @@ class NfcHalDeathRecipient : public hidl_death_recipient {
+   }
+ };
+ 
++#if (NXP_EXTNS == TRUE)
++class NfcDeathRecipient : public hidl_death_recipient {
++ public:
++  android::sp<android::hardware::nfc::V1_0::INfc> mNfcDeathHal;
++  NfcDeathRecipient(android::sp<android::hardware::nfc::V1_0::INfc> &mHal) {
++    mNfcDeathHal = mHal;
++  }
++
++  virtual void serviceDied(
++      uint64_t /* cookie */,
++      const wp<::android::hidl::base::V1_0::IBase>& /* who */) {
++    ALOGE("NfcDeathRecipient::serviceDied - Nfc service died");
++    mNfcDeathHal->unlinkToDeath(this);
++    mNfcDeathHal = nullptr;
++    abort();
++  }
++};
++#endif
++
+ /*******************************************************************************
+ **
+ ** Function:    NfcAdaptation::NfcAdaptation()
+@@ -166,7 +214,7 @@ class NfcHalDeathRecipient : public hidl_death_recipient {
+ **
+ *******************************************************************************/
+ NfcAdaptation::NfcAdaptation() {
+-  mNfcHalDeathRecipient = new NfcHalDeathRecipient(mHal);
++  mNfcHalDeathRecipient = new NfcDeathRecipient(mHal);
+   memset(&mHalEntryFuncs, 0, sizeof(mHalEntryFuncs));
+ }
+ 
+@@ -200,6 +248,72 @@ NfcAdaptation& NfcAdaptation::GetInstance() {
+   return *mpInstance;
+ }
+ 
++#if(NXP_EXTNS == TRUE)
++/*******************************************************************************
++**
++** Function:    IoctlCallback
++**
++** Description: Callback from HAL stub for IOCTL api invoked.
++**              Output data for IOCTL is sent as argument
++**
++** Returns:     None.
++**
++*******************************************************************************/
++void IoctlCallback(::android::hardware::nfc::V1_0::NfcData outputData) {
++  const char* func = "IoctlCallback";
++  nfc_nci_ExtnOutputData_t* pOutData =
++      (nfc_nci_ExtnOutputData_t*)&outputData[0];
++  DLOG_IF(INFO, nfc_debug_enabled) << StringPrintf("%s Ioctl Type=%llu", func, (unsigned long long)pOutData->ioctlType);
++  NfcAdaptation* pAdaptation = (NfcAdaptation*)pOutData->context;
++  /*Output Data from stub->Proxy is copied back to output data
++   * This data will be sent back to libnfc*/
++  memcpy(&pAdaptation->mCurrentIoctlData->out, &outputData[0],
++         sizeof(nfc_nci_ExtnOutputData_t));
++}
++/*******************************************************************************
++**
++** Function:    NfcAdaptation::HalIoctl
++**
++** Description: Calls ioctl to the Nfc driver.
++**              If called with a arg value of 0x01 than wired access requested,
++**              status of the requst would be updated to p_data.
++**              If called with a arg value of 0x00 than wired access will be
++**              released, status of the requst would be updated to p_data.
++**              If called with a arg value of 0x02 than current p61 state would
++*be
++**              updated to p_data.
++**
++** Returns:     -1 or 0.
++**
++*******************************************************************************/
++int NfcAdaptation::HalIoctl(long arg, void* p_data) {
++  const char* func = "NfcAdaptation::HalIoctl";
++  ::android::hardware::nfc::V1_0::NfcData data;
++  sIoctlMutex.lock();
++  nfc_nci_IoctlInOutData_t* pInpOutData = (nfc_nci_IoctlInOutData_t*)p_data;
++  DLOG_IF(INFO, nfc_debug_enabled) << StringPrintf("%s arg=%ld", func, arg);
++  pInpOutData->inp.context = &NfcAdaptation::GetInstance();
++  NfcAdaptation::GetInstance().mCurrentIoctlData = pInpOutData;
++  data.setToExternal((uint8_t*)pInpOutData, sizeof(nfc_nci_IoctlInOutData_t));
++  if(mHalNxpNfc != nullptr) {
++      mHalNxpNfc->ioctl(arg, data, IoctlCallback);
++  }
++  DLOG_IF(INFO, nfc_debug_enabled) << StringPrintf("%s Ioctl Completed for Type=%llu", func, (unsigned long long)pInpOutData->out.ioctlType);
++  sIoctlMutex.unlock();
++  return (pInpOutData->out.result);
++}
++
++void NfcAdaptation::GetNxpConfigs(
++    std::map<std::string, ConfigValue>& configMap) {
++  nfc_nci_IoctlInOutData_t inpOutData;
++  int ret = HalIoctl(HAL_NFC_GET_NXP_CONFIG, &inpOutData);
++  DLOG_IF(INFO, nfc_debug_enabled)
++      << StringPrintf("HAL_NFC_GET_NXP_CONFIG ioctl return value = %d", ret);
++  configMap.emplace(NAME_NXP_AGC_DEBUG_ENABLE,
++                  ConfigValue(inpOutData.out.data.nxpConfigs.wAgcDebugEnable));
++}
++#endif
++
+ void NfcAdaptation::GetVendorConfigs(
+     std::map<std::string, ConfigValue>& configMap) {
+   NfcVendorConfigV1_2 configValue;
+@@ -513,6 +627,15 @@ void NfcAdaptation::InitializeHalDeviceContext() {
+   mHalEntryFuncs.control_granted = HalControlGranted;
+   mHalEntryFuncs.power_cycle = HalPowerCycle;
+   mHalEntryFuncs.get_max_ee = HalGetMaxNfcee;
++#if (NXP_EXTNS == TRUE)
++  if (mHalNxpNfc == nullptr) {
++    mHalNxpNfc = INxpNfc::tryGetService();
++    LOG(INFO) << StringPrintf ( "Failed to retrieve the NXP NFC HAL!");
++  } else {
++    LOG(INFO) << StringPrintf("%s: mHalNxpNfc::getService() returned %p (%s)", func, mHalNxpNfc.get(),
++          (mHalNxpNfc->isRemote() ? "remote" : "local"));
++  }
++#endif
+   LOG(INFO) << StringPrintf("%s: INfc::getService()", func);
+   mHal = mHal_1_1 = mHal_1_2 = INfcV1_2::getService();
+   if (mHal_1_2 == nullptr) {
+@@ -521,7 +644,16 @@ void NfcAdaptation::InitializeHalDeviceContext() {
+       mHal = INfc::getService();
+     }
+   }
++  if (mHal == nullptr) {
++    LOG(INFO) << StringPrintf ( "Failed to retrieve the NFC HAL!");
++  }else {
++    LOG(INFO) << StringPrintf("%s: INfc::getService() returned %p (%s)", func, mHal.get(),
++          (mHal->isRemote() ? "remote" : "local"));
++  }
+   LOG_FATAL_IF(mHal == nullptr, "Failed to retrieve the NFC HAL!");
++#if(NXP_EXTNS == TRUE)
++  mHal->linkToDeath(mNfcHalDeathRecipient,0);
++#endif
+   LOG(INFO) << StringPrintf("%s: INfc::getService() returned %p (%s)", func,
+                             mHal.get(),
+                             (mHal->isRemote() ? "remote" : "local"));
+diff --git a/src/adaptation/nfc_config.cc b/src/adaptation/nfc_config.cc
+index 264968e..d2b6dfd 100644
+--- a/src/adaptation/nfc_config.cc
++++ b/src/adaptation/nfc_config.cc
+@@ -13,6 +13,25 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
++/******************************************************************************
++ *
++ *  The original Work has been changed by NXP Semiconductors.
++ *
++ *  Copyright (C) 2020 NXP Semiconductors
++ *
++ *  Licensed under the Apache License, Version 2.0 (the "License");
++ *  you may not use this file except in compliance with the License.
++ *  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ *  Unless required by applicable law or agreed to in writing, software
++ *  distributed under the License is distributed on an "AS IS" BASIS,
++ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ *  See the License for the specific language governing permissions and
++ *  limitations under the License.
++ *
++ ******************************************************************************/
+ #include "nfc_config.h"
+ #include "NfcAdaptation.h"
+ 
+@@ -24,6 +43,8 @@
+ 
+ #include <config.h>
+ 
++
++
+ using namespace ::std;
+ using namespace ::android::base;
+ 
+@@ -66,6 +87,8 @@ std::string findConfigPath() {
+ }  // namespace
+ 
+ void NfcConfig::loadConfig() {
++  LOG(INFO) << __func__
++            << "Entry";
+   string config_path = findConfigPath();
+   CHECK(config_path != "");
+   config_.parseFromFile(config_path);
+@@ -73,9 +96,14 @@ void NfcConfig::loadConfig() {
+   NfcAdaptation& theInstance = NfcAdaptation::GetInstance();
+   std::map<std::string, ConfigValue> configMap;
+   theInstance.GetVendorConfigs(configMap);
++#if(NXP_EXTNS == TRUE)
++  theInstance.GetNxpConfigs(configMap);
++#endif
+   for (auto config : configMap) {
+     config_.addConfig(config.first, config.second);
+   }
++  LOG(INFO) << __func__
++            << "Exit";
+ }
+ 
+ NfcConfig::NfcConfig() { loadConfig(); }
+diff --git a/src/include/NfcAdaptation.h b/src/include/NfcAdaptation.h
+index df12a44..425fc20 100644
+--- a/src/include/NfcAdaptation.h
++++ b/src/include/NfcAdaptation.h
+@@ -15,6 +15,25 @@
+  *  limitations under the License.
+  *
+  ******************************************************************************/
++/******************************************************************************
++ *
++ *  The original Work has been changed by NXP Semiconductors.
++ *
++ *  Copyright (C) 2020 NXP Semiconductors
++ *
++ *  Licensed under the Apache License, Version 2.0 (the "License");
++ *  you may not use this file except in compliance with the License.
++ *  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ *  Unless required by applicable law or agreed to in writing, software
++ *  distributed under the License is distributed on an "AS IS" BASIS,
++ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ *  See the License for the specific language governing permissions and
++ *  limitations under the License.
++ *
++ ******************************************************************************/
+ #pragma once
+ #include <pthread.h>
+ 
+@@ -23,6 +42,12 @@
+ #include "nfc_target.h"
+ 
+ #include <utils/RefBase.h>
++#if(NXP_EXTNS == TRUE)
++#include <vendor/nxp/nxpnfc/1.0/INxpNfc.h>
++#include "hal_nxpnfc.h"
++using vendor::nxp::nxpnfc::V1_0::INxpNfc;
++using android::sp;
++#endif
+ 
+ using ::android::sp;
+ 
+@@ -85,6 +110,10 @@ class AutoThreadMutex {
+ 
+ class NfcHalDeathRecipient;
+ 
++#if(NXP_EXTNS == TRUE)
++class NfcDeathRecipient ;
++#endif
++
+ class NfcAdaptation {
+  public:
+   virtual ~NfcAdaptation();
+@@ -96,6 +125,10 @@ class NfcAdaptation {
+   tHAL_NFC_ENTRY* GetHalEntryFuncs();
+   bool DownloadFirmware();
+   void GetVendorConfigs(std::map<std::string, ConfigValue>& configMap);
++#if(NXP_EXTNS == TRUE)
++  void GetNxpConfigs(std::map<std::string, ConfigValue>& configMap);
++  nfc_nci_IoctlInOutData_t* mCurrentIoctlData;
++#endif
+   void Dump(int fd);
+ 
+  private:
+@@ -109,11 +142,15 @@ class NfcAdaptation {
+   static android::sp<android::hardware::nfc::V1_1::INfc> mHal_1_1;
+   static android::sp<android::hardware::nfc::V1_2::INfc> mHal_1_2;
+   static android::hardware::nfc::V1_1::INfcClientCallback* mCallback;
+-  sp<NfcHalDeathRecipient> mNfcHalDeathRecipient;
++  //sp<NfcHalDeathRecipient> mNfcHalDeathRecipient;
+   static tHAL_NFC_CBACK* mHalCallback;
+   static tHAL_NFC_DATA_CBACK* mHalDataCallback;
+   static ThreadCondVar mHalOpenCompletedEvent;
+   static ThreadCondVar mHalCloseCompletedEvent;
++  #if(NXP_EXTNS == TRUE)
++  static android::sp<vendor::nxp::nxpnfc::V1_0::INxpNfc> mHalNxpNfc;
++  sp<NfcDeathRecipient> mNfcHalDeathRecipient;
++  #endif
+ 
+   static uint32_t NFCA_TASK(uint32_t arg);
+   static uint32_t Thread(uint32_t arg);
+@@ -130,6 +167,9 @@ class NfcAdaptation {
+   static void HalCoreInitialized(uint16_t data_len,
+                                  uint8_t* p_core_init_rsp_params);
+   static void HalWrite(uint16_t data_len, uint8_t* p_data);
++#if (NXP_EXTNS == TRUE)
++  static int HalIoctl(long arg, void* p_data);
++#endif
+   static bool HalPrediscover();
+   static void HalControlGranted();
+   static void HalPowerCycle();
+diff --git a/src/include/hal_nxpnfc.h b/src/include/hal_nxpnfc.h
+new file mode 100755
+index 0000000..d7631e9
+--- /dev/null
++++ b/src/include/hal_nxpnfc.h
+@@ -0,0 +1,161 @@
++/******************************************************************************
++ *
++ *  Copyright 2020 NXP
++ *
++ *  Licensed under the Apache License, Version 2.0 (the "License");
++ *  you may not use this file except in compliance with the License.
++ *  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ *  Unless required by applicable law or agreed to in writing, software
++ *  distributed under the License is distributed on an "AS IS" BASIS,
++ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ *  See the License for the specific language governing permissions and
++ *  limitations under the License.
++ *
++ ******************************************************************************/
++#if(NXP_EXTNS == TRUE)
++#ifndef ANDROID_HARDWARE_HAL_NXPNFC_V1_0_H
++#define ANDROID_HARDWARE_HAL_NXPNFC_V1_0_H
++#include <vector>
++#include <string>
++
++#define MAX_IOCTL_TRANSCEIVE_CMD_LEN 256
++#define MAX_IOCTL_TRANSCEIVE_RESP_LEN 256
++#define MAX_ATR_INFO_LEN 128
++
++enum {
++  HAL_NFC_GET_NXP_CONFIG = 30,
++};
++
++/*
++ * Data structures provided below are used of Hal Ioctl calls
++ */
++/*
++ * nfc_nci_ExtnCmd_t shall contain data for commands used for transceive command
++ * in ioctl
++ */
++typedef struct {
++  uint16_t cmd_len;
++  uint8_t p_cmd[MAX_IOCTL_TRANSCEIVE_CMD_LEN];
++} nfc_nci_ExtnCmd_t;
++
++/*
++ * nxp_nfc_scrResetEmvcoCmd_t shall contain core set conf command to reset EMVCO
++ * mode and the length of the command
++ */
++typedef struct {
++  long len;
++  uint8_t cmd[10];
++} nxp_nfc_scrResetEmvcoCmd_t;
++
++/*
++ * nfc_nci_ExtnRsp_t shall contain response for command sent in transceive
++ * command
++ */
++typedef struct {
++  uint8_t wAgcDebugEnable;
++} nxp_nfc_config_t;
++/*
++ * nfc_nci_ExtnRsp_t shall contain response for command sent in transceive
++ * command
++ */
++typedef struct {
++  uint16_t rsp_len;
++  uint8_t p_rsp[MAX_IOCTL_TRANSCEIVE_RESP_LEN];
++} nfc_nci_ExtnRsp_t;
++/*
++ * TransitConfig_t shall contain transit config value and transit
++ * Configuration length
++ */
++typedef struct {
++  long len;
++  char *val;
++} TransitConfig_t;
++/*
++ * InputData_t :ioctl has multiple subcommands
++ * Each command has corresponding input data which needs to be populated in this
++ */
++typedef union {
++  uint16_t bootMode;
++  uint8_t halType;
++  nfc_nci_ExtnCmd_t nciCmd;
++  uint32_t timeoutMilliSec;
++  long nfcServicePid;
++  TransitConfig_t transitConfig;
++} InputData_t;
++/*
++ * nfc_nci_ExtnInputData_t :Apart from InputData_t, there are context data
++ * which is required during callback from stub to proxy.
++ * To avoid additional copy of data while propagating from libnfc to Adaptation
++ * and Nfcstub to ncihal, common structure is used. As a sideeffect, context
++ * data
++ * is exposed to libnfc (Not encapsulated).
++ */
++typedef struct {
++  /*context to be used/updated only by users of proxy & stub of Nfc.hal
++  * i.e, NfcAdaptation & hardware/interface/Nfc.
++  */
++  void* context;
++  InputData_t data;
++  uint8_t data_source;
++  long level;
++} nfc_nci_ExtnInputData_t;
++
++/*
++ * outputData_t :ioctl has multiple commands/responses
++ * This contains the output types for each ioctl.
++ */
++typedef union {
++  uint32_t status;
++  nfc_nci_ExtnRsp_t nciRsp;
++  uint8_t nxpNciAtrInfo[MAX_ATR_INFO_LEN];
++  uint32_t p61CurrentState;
++  uint16_t fwUpdateInf;
++  uint16_t fwDwnldStatus;
++  uint16_t fwMwVerStatus;
++  uint8_t chipType;
++  nxp_nfc_config_t nxpConfigs;
++} outputData_t;
++
++/*
++ * nfc_nci_ExtnOutputData_t :Apart from outputData_t, there are other
++ * information
++ * which is required during callback from stub to proxy.
++ * For ex (context, result of the operation , type of ioctl which was
++ * completed).
++ * To avoid additional copy of data while propagating from libnfc to Adaptation
++ * and Nfcstub to ncihal, common structure is used. As a sideeffect, these data
++ * is exposed(Not encapsulated).
++ */
++typedef struct {
++  /*ioctlType, result & context to be used/updated only by users of
++   * proxy & stub of Nfc.hal.
++   * i.e, NfcAdaptation & hardware/interface/Nfc
++   * These fields shall not be used by libnfc or halimplementation*/
++  uint64_t ioctlType;
++  uint32_t result;
++  void* context;
++  outputData_t data;
++} nfc_nci_ExtnOutputData_t;
++
++/*
++ * nfc_nci_IoctlInOutData_t :data structure for input & output
++ * to be sent for ioctl command. input is populated by client/proxy side
++ * output is provided from server/stub to client/proxy
++ */
++typedef struct {
++  nfc_nci_ExtnInputData_t inp;
++  nfc_nci_ExtnOutputData_t out;
++} nfc_nci_IoctlInOutData_t;
++
++enum NxpNfcHalStatus {
++    /** In case of an error, HCI network needs to be re-initialized */
++    HAL_NFC_STATUS_RESTART = 0x30,
++    HAL_NFC_HCI_NV_RESET = 0x40,
++    HAL_NFC_CONFIG_ESE_LINK_COMPLETE = 0x50
++};
++
++#endif  // ANDROID_HARDWARE_HAL_NXPNFC_V1_0_H
++#endif  // NXP_EXTNS
+\ No newline at end of file
+diff --git a/src/include/nfc_config.h b/src/include/nfc_config.h
+index dda4260..49fac35 100644
+--- a/src/include/nfc_config.h
++++ b/src/include/nfc_config.h
+@@ -13,6 +13,25 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
++/******************************************************************************
++ *
++ *  The original Work has been changed by NXP Semiconductors.
++ *
++ *  Copyright (C) 2020 NXP Semiconductors
++ *
++ *  Licensed under the Apache License, Version 2.0 (the "License");
++ *  you may not use this file except in compliance with the License.
++ *  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ *  Unless required by applicable law or agreed to in writing, software
++ *  distributed under the License is distributed on an "AS IS" BASIS,
++ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ *  See the License for the specific language governing permissions and
++ *  limitations under the License.
++ *
++ ******************************************************************************/
+ #pragma once
+ 
+ #include <string>
+@@ -56,6 +75,9 @@
+ #define NAME_ISO_DEP_MAX_TRANSCEIVE "ISO_DEP_MAX_TRANSCEIVE"
+ #define NAME_DEVICE_HOST_WHITE_LIST "DEVICE_HOST_WHITE_LIST"
+ #define NAME_DEFAULT_ISODEP_ROUTE "DEFAULT_ISODEP_ROUTE"
++#if(NXP_EXTNS == TRUE)
++#define NAME_NXP_AGC_DEBUG_ENABLE "NXP_AGC_DEBUG_ENABLE"
++#endif
+ 
+ class NfcConfig {
+  public:
+diff --git a/src/nfa/ce/nfa_ce_act.cc b/src/nfa/ce/nfa_ce_act.cc
+index 1efca7d..cf47bb4 100644
+--- a/src/nfa/ce/nfa_ce_act.cc
++++ b/src/nfa/ce/nfa_ce_act.cc
+@@ -15,6 +15,25 @@
+  *  limitations under the License.
+  *
+  ******************************************************************************/
++/******************************************************************************
++ *
++ *  The original Work has been changed by NXP Semiconductors.
++ *
++ *  Copyright (C) 2020 NXP Semiconductors
++ *
++ *  Licensed under the Apache License, Version 2.0 (the "License");
++ *  you may not use this file except in compliance with the License.
++ *  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ *  Unless required by applicable law or agreed to in writing, software
++ *  distributed under the License is distributed on an "AS IS" BASIS,
++ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ *  See the License for the specific language governing permissions and
++ *  limitations under the License.
++ *
++ ******************************************************************************/
+ 
+ /******************************************************************************
+  *
+@@ -359,6 +378,11 @@ void nfc_ce_t3t_set_listen_params(void) {
+ 
+   /* For NCI draft 22+, the polarity of NFC_PMID_LF_T3T_FLAGS2 is flipped */
+   t3t_flags2_mask = ~t3t_flags2_mask;
++#if (NXP_EXTNS == TRUE)
++  if (NFC_GetNCIVersion() == NCI_VERSION_1_0) {
++    t3t_flags2_mask = ((t3t_flags2_mask & 0x00FF) << 8 | (t3t_flags2_mask & 0xFF00) >> 8);
++  }
++#endif
+ 
+   UINT8_TO_STREAM(p_params, NFC_PMID_LF_T3T_FLAGS2);      /* type */
+   UINT8_TO_STREAM(p_params, NCI_PARAM_LEN_LF_T3T_FLAGS2); /* length */
+diff --git a/src/nfc/tags/rw_i93.cc b/src/nfc/tags/rw_i93.cc
+index 11953d6..753dc73 100644
+--- a/src/nfc/tags/rw_i93.cc
++++ b/src/nfc/tags/rw_i93.cc
+@@ -15,6 +15,25 @@
+  *  limitations under the License.
+  *
+  ******************************************************************************/
++/******************************************************************************
++ *
++ *  The original Work has been changed by NXP Semiconductors.
++ *
++ *  Copyright (C) 2020 NXP Semiconductors
++ *
++ *  Licensed under the Apache License, Version 2.0 (the "License");
++ *  you may not use this file except in compliance with the License.
++ *  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ *  Unless required by applicable law or agreed to in writing, software
++ *  distributed under the License is distributed on an "AS IS" BASIS,
++ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ *  See the License for the specific language governing permissions and
++ *  limitations under the License.
++ *
++ ******************************************************************************/
+ 
+ /******************************************************************************
+  *
+@@ -542,7 +561,7 @@ void rw_i93_send_to_upper(NFC_HDR* p_resp) {
+       /* This STM & ONS tag supports more than 2040 bytes */
+       p_i93->intl_flags |= RW_I93_FLAG_16BIT_NUM_BLOCK;
+       p_i93->state = RW_I93_STATE_BUSY;
+-    } else if (length) {
++    } else {
+       /* notify error to upper layer */
+       rw_data.i93_cmd_cmpl.status = NFC_STATUS_FAILED;
+       rw_data.i93_cmd_cmpl.command = p_i93->sent_cmd;
+@@ -3252,8 +3271,12 @@ static void rw_i93_data_cback(__attribute__((unused)) uint8_t conn_id,
+       p_i93->state = RW_I93_STATE_IDLE;
+       p_i93->sent_cmd = 0;
+ 
+-      /* if any response, send presence check with ok */
+-      rw_data.status = NFC_STATUS_OK;
++      /* depending of response length, send presence check with ok or failed */
++      if (p_resp->len > 1) {
++        rw_data.status  = NFC_STATUS_OK;
++      } else {
++        rw_data.status  = NFC_STATUS_FAILED;
++      }
+       (*(rw_cb.p_cback))(RW_I93_PRESENCE_CHECK_EVT, &rw_data);
+       GKI_freebuf(p_resp);
+       break;
+-- 
+2.28.0
+
